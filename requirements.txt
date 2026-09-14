@@ -1,0 +1,14 @@
+streamlit
+streamlit-folium
+folium
+geopandas
+pyogrio
+shapely
+scipy
+pandas
+numpy
+networkx
+branca
+jinja2
+geopy
+qrcode[pil]
