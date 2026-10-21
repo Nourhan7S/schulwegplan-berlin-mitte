@@ -15,6 +15,8 @@ from shapely.geometry import Point, LineString
 from branca.element import MacroElement
 from jinja2 import Template
 from geopy.geocoders import Nominatim
+from geopy.exc import GeocoderServiceError
+import time
 
 
 class MapLegend(MacroElement):
@@ -906,6 +908,20 @@ def render_personal_feeder_form(selection, schools):
             if not home_text:
                 st.warning("Enter an address first.")
             else:
+                # A pasted "lat, lon" pair (e.g. "52.523898, 13.401099") isn't a
+                # geocodable place name -- detect it and use it directly instead
+                # of sending it to Nominatim, where it would just fail.
+                coord_match = re.match(
+                    r"^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$", home_text
+                )
+                if coord_match:
+                    lat_val, lon_val = float(coord_match.group(1)), float(coord_match.group(2))
+                    if -90 <= lat_val <= 90 and -180 <= lon_val <= 180:
+                        hx, hy = wgs84_to_metric(lat_val, lon_val)
+                        raw = f"({lat_val:.5f}, {lon_val:.5f})"
+                        result = add_personal_feeder(sidx, selection, hx, hy, raw, force=force)
+                        _show_feeder_result(result)
+                        return
                 geolocator = get_geolocator()
                 # Only append ", Berlin, Germany" if the address doesn't already
                 # name Berlin/Germany -- doing it unconditionally double-suffixes
@@ -913,12 +929,29 @@ def render_personal_feeder_form(selection, schools):
                 # malformed query Nominatim can't match.
                 query = home_text if re.search(r"berlin|germany|deutschland", home_text, re.I) \
                     else f"{home_text}, Berlin, Germany"
-                try:
-                    loc = geolocator.geocode(query)
-                except Exception:
-                    loc = None
+                loc = None
+                err = None
+                # Nominatim's public server occasionally times out or rate-limits
+                # under bursty use -- retry transient failures once after a short
+                # pause before giving up; a genuinely bad address fails instantly
+                # (no exception) and isn't retried.
+                for attempt in range(2):
+                    try:
+                        loc = geolocator.geocode(query)
+                        err = None
+                        break
+                    except GeocoderServiceError as e:
+                        err = e
+                        if attempt == 0:
+                            time.sleep(1.5)
+                    except Exception as e:
+                        err = e
+                        break
                 if loc is None:
-                    st.error(f"Could not geocode {home_text!r} — try Coordinates instead.")
+                    msg = f"Could not geocode {home_text!r} — try Coordinates instead."
+                    if err is not None:
+                        msg += f"  ({type(err).__name__}: {err})"
+                    st.error(msg)
                 else:
                     hx, hy = wgs84_to_metric(loc.latitude, loc.longitude)
                     result = add_personal_feeder(sidx, selection, hx, hy, home_text, force=force)
