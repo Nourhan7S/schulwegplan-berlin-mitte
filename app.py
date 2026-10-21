@@ -951,6 +951,8 @@ def render_personal_feeder_form(selection, schools):
                     msg = f"Could not geocode {home_text!r} — try Coordinates instead."
                     if err is not None:
                         msg += f"  ({type(err).__name__}: {err})"
+                    else:
+                        msg += "  (Nominatim returned zero results — possibly blocking this server's IP)"
                     st.error(msg)
                 else:
                     hx, hy = wgs84_to_metric(loc.latitude, loc.longitude)
