@@ -11,4 +11,5 @@ networkx
 branca
 jinja2
 geopy
+requests
 qrcode[pil]

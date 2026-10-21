@@ -14,8 +14,9 @@ from scipy.spatial import cKDTree
 from shapely.geometry import Point, LineString
 from branca.element import MacroElement
 from jinja2 import Template
+import requests
 from geopy.geocoders import Nominatim
-from geopy.exc import GeocoderServiceError
+from geopy.exc import GeocoderServiceError, GeocoderRateLimited
 import time
 
 
@@ -555,8 +556,62 @@ def load_routing_resources():
     )
 
 
+class _GeocodeResult:
+    def __init__(self, latitude, longitude):
+        self.latitude = latitude
+        self.longitude = longitude
+
+
+class _LocationIQGeocoder:
+    """Minimal geopy-style adapter for LocationIQ's forward-geocoding API --
+    geopy has no built-in LocationIQ geocoder class. Mimics just the
+    .geocode(query) -> result-with-.latitude/.longitude-or-None interface
+    that the rest of this file relies on, and raises the same geopy
+    exception types so the existing retry logic keeps working unchanged."""
+
+    def __init__(self, api_key, timeout=5):
+        self.api_key = api_key
+        self.timeout = timeout
+
+    def geocode(self, query):
+        resp = requests.get(
+            "https://us1.locationiq.com/v1/search",
+            params={"key": self.api_key, "q": query, "format": "json", "limit": 1},
+            timeout=self.timeout,
+        )
+        if resp.status_code == 429:
+            raise GeocoderRateLimited(f"Non-successful status code {resp.status_code}")
+        try:
+            data = resp.json()
+        except ValueError:
+            data = None
+        # LocationIQ returns 404 + {"error": "Unable to geocode"} for a
+        # genuine no-match, not a service failure -- treat that as "no result"
+        # rather than raising, same as Nominatim returning an empty list.
+        if resp.status_code == 404 and isinstance(data, dict) and "error" in data:
+            return None
+        if resp.status_code != 200:
+            raise GeocoderServiceError(f"Non-successful status code {resp.status_code}")
+        if not data:
+            return None
+        top = data[0]
+        return _GeocodeResult(float(top["lat"]), float(top["lon"]))
+
+
 @st.cache_resource
 def get_geolocator():
+    # Nominatim's public server rate-limits/blocks requests from cloud-hosting
+    # IP ranges (Streamlit Cloud included) with a 429, even for a single
+    # request -- it's an IP-level block, not something retries fix. LocationIQ
+    # (also OSM-based) tolerates cloud traffic on its free tier, so prefer it
+    # when a key is configured and fall back to Nominatim for local dev, where
+    # the residential IP isn't blocked.
+    try:
+        api_key = st.secrets["LOCATIONIQ_API_KEY"]
+    except Exception:
+        api_key = None
+    if api_key:
+        return _LocationIQGeocoder(api_key, timeout=5)
     return Nominatim(user_agent="schulwegplan-berlin-mitte-app", timeout=5)
 
 
@@ -952,7 +1007,7 @@ def render_personal_feeder_form(selection, schools):
                     if err is not None:
                         msg += f"  ({type(err).__name__}: {err})"
                     else:
-                        msg += "  (Nominatim returned zero results — possibly blocking this server's IP)"
+                        msg += "  (geocoder returned zero results)"
                     st.error(msg)
                 else:
                     hx, hy = wgs84_to_metric(loc.latitude, loc.longitude)
